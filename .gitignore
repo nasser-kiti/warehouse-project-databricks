@@ -1,0 +1,7 @@
+.neon
+.env.local
+*lock*
+/package.json
+/node_modules
+.agents
+*.ts
