@@ -46,6 +46,8 @@ node/.npm/
 # Neon
 .neon/cache/
 .agents
+hello.ts
+neon.ts
 
 # IDE / editor
 .vscode/
