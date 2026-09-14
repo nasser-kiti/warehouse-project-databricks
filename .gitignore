@@ -1,7 +1,63 @@
-.neon
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# uv
+# uv.lock should generally be committed for reproducible installs — do NOT ignore it
+.uv-cache/
+
+# Environment / secrets
+.env
 .env.local
-*lock*
-/package.json
-/node_modules
+.env.*.local
+*.pem
+*.key
+
+# dbt
+dbt/**/target/
+dbt/**/dbt_packages/
+dbt/**/logs/
+.dbt/
+dbt/profiles.yml
+dbt/.user.yml
+
+# Airflow
+airflow.db
+airflow.cfg
+airflow-webserver.pid
+logs/
+standalone_admin_password.txt
+
+# Node
+node/node_modules/
+node/npm-debug.log*
+node/.npm/
+
+# Neon
+.neon/cache/
 .agents
-*.ts
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Misc data / local artifacts
+assets/data/
+*.log
+*.tmp
