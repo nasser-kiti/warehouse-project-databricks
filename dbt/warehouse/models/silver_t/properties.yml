@@ -1,0 +1,26 @@
+models:
+    - name: products_t
+      columns:
+        - name: product_id
+          data_tests:
+            - not_null
+            - unique
+        - name: product_name
+          data_tests:
+            - not_null
+        - name: price
+          data_tests:
+            - not_null
+            - greater_than:
+                value: 0
+
+    - name: orders_t
+      columns:
+        - name: order_id
+          data_tests:
+            - not_null
+            - unique:
+                    config:
+                        severity: error
+                        error_if: ">1000"
+                        warn_if: ">10"

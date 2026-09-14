@@ -90,3 +90,11 @@ Important that you follow the extension's instructions to make sure that the dep
 mv ~/.dbt/profiles.yml ~/repository_path/dbt/profiles.yml
 mv dbt/warehouse/your _dbt_project_name.yml dbt/your_dbt_project_name.yml
 ```
+add sources
+create models for the silver_technical(`silver_t`) layer
+`dbt run` to create dbt model tables in databricks
+
+Create dbt generic tests for the models before accepting any data to the new tables.
+run `dbt test` to
+![alt text](image.png)
+
