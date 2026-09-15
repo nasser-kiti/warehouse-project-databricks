@@ -284,3 +284,11 @@ Then re-run `dbt debug` to confirm the connection.
 3. Implement Apache Airflow DAGs to orchestrate ingestion trigger → `dbt run` → `dbt test`, replacing the current manual trigger.
 4. Add the architecture, data model, and DAG diagrams listed in [Documentation](#documentation).
 5. Promote the custom OBT null-key test from `warn` to `error` severity once confident the join logic is stable.
+
+`dbt snapshot`
+![alt text](image.png)
+![alt text](image-1.png)
+
+gold layer
+`dbt run`
+![alt text](image-2.png)
