@@ -60,6 +60,5 @@ neon.ts
 Thumbs.db
 
 # Misc data / local artifacts
-assets/data/
 *.log
 *.tmp
