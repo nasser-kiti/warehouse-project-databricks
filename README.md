@@ -292,3 +292,22 @@ Then re-run `dbt debug` to confirm the connection.
 gold layer
 `dbt run`
 ![alt text](image-2.png)
+
+pause db job
+ ![alt text](image-3.png)
+
+ install databricks job python sdk
+ `uv add databricks-sdk`
+
+ bucket creation
+ ![alt text](image-4.png)
+
+ Add external connection for databricks to s3
+ ![alt text](image-5.png)
+ ![alt text](image-6.png)
+ ![alt text](image-7.png)
+![alt text](image-11.png)
+ ![alt text](image-9.png)
+ ![alt text](image-10.png)
+ ![alt text](image-12.png)
+ ![alt text](image-13.png)
