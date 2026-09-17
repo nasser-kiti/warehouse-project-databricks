@@ -4,32 +4,16 @@ This project demonstrates how to build a modern data warehouse on **Databricks (
 
 ### Table of Contents
 
-- [Data Warehousing Project (Databricks + dbt + Airflow)](#data-warehousing-project-databricks--dbt--airflow)
-  - [Table of Contents](#table-of-contents)
-  - [Project Overview](#project-overview)
-  - [Project Requirements](#project-requirements)
-  - [Objective](#objective)
-    - [Business Rules](#business-rules)
-    - [Specifications](#specifications)
-  - [Data Architecture](#data-architecture)
-    - [Technology Stack](#technology-stack)
-  - [Getting Started](#getting-started)
-    - [Prerequisites](#prerequisites)
-    - [Setup Steps](#setup-steps)
-  - [Data Loading Pipeline](#data-loading-pipeline)
-    - [Bronze Layer (Raw Ingestion)](#bronze-layer-raw-ingestion)
-    - [Silver\_t Layer (Per-Source Transformation)](#silver_t-layer-per-source-transformation)
-    - [Silver\_b Layer (Business OBT)](#silver_b-layer-business-obt)
-    - [Gold Layer](#gold-layer)
-  - [Orchestration](#orchestration)
-  - [Data Sources](#data-sources)
-    - [Postgres Source System (via Neon)](#postgres-source-system-via-neon)
-  - [Data Quality Checks](#data-quality-checks)
-  - [Troubleshooting](#troubleshooting)
-    - [dbt profile path issues](#dbt-profile-path-issues)
-    - [Database connection failures](#database-connection-failures)
-    - [Airflow DAG not appearing / behaving unexpectedly](#airflow-dag-not-appearing--behaving-unexpectedly)
-
+- [Project Overview](#project-overview)
+- [Project Requirements](#project-requirements)
+- [Objective](#objective)
+- [Data Architecture](#data-architecture)
+- [Getting Started](#getting-started)
+- [Data Loading Pipeline](#data-loading-pipeline)
+- [Orchestration](#orchestration)
+- [Data Sources](#data-sources)
+- [Data Quality Checks](#data-quality-checks)
+- [Troubleshooting](#troubleshooting)
 ---
 
 ### Project Overview
@@ -38,7 +22,7 @@ This project involves:
 
 - **Data Architecture**: A Medallion architecture on Databricks Unity Catalog.
 - **Ingestion**: Incremental, timestamp-based capture from a Postgres OLTP source into Databricks via a managed Lakeflow connection.
-- **Transformation**: dbt models on Databricks SQL; incremental silver models, a denormalized One Big Table (OBT) business layer, and a Gold-layer star schema with SCD Type 2 dimensions.
+- **Transformation**: dbt models on Databricks SQL; incremental silver models, a denormalised One Big Table (OBT) business layer, and a Gold-layer star schema with SCD Type 2 dimensions.
 - **Data Quality**: dbt generic and custom tests, gating each layer before the next is allowed to build.
 - **Orchestration**: An end-to-end Airflow DAG (run via Docker Compose) that sequences ingestion and building the layers gated with tests.
 
@@ -67,13 +51,13 @@ Build a Databricks-based data warehouse that ingests retail transaction data fro
 
 ### Data Architecture
 
-The project follows a Medallion archityecture pattern with Bronze, Silver and Gold layers on Databricks Unity Catalog:
+The project follows a Medallion architecture pattern with Bronze, Silver and Gold layers on Databricks Unity Catalog:
 
 - **Bronze Layer**: Raw data landed from the Postgres source into the `walmart.bronze` schema via Databricks Lakeflow, no transformation applied.
 - **Silver_t (Technical) Layer**: One incremental dbt model per source table (`customers_t`, `stores_t`, `products_t`, `employees_t`, `orders_t`, `order_items_t`), each keyed on its natural ID and watermarked on `updated_timestamp`, with a `processed_at` audit column added.
-- **Silver_b (Business) Layer**: A single denormalized One Big Table (`obt_b`) that left-joins all six Silver_t models around `orders`, renaming columns per source table (e.g. `customer_first_name`, `store_city`).
+- **Silver_b (Business) Layer**: A single denormalised One Big Table (`obt_b`) that left-joins all six Silver_t models around `orders`, renaming columns per source table (e.g. `customer_first_name`, `store_city`).
 - **Gold Layer**:
-  - **Ephemeral models** (`eph_customers`, `eph_products`, `eph_stores`, `eph_employees`, `eph_orders`): deduplicated, per-entity views over `obt_b`, materialized as `ephemeral` (compiled inline, no physical table).
+  - **Ephemeral models** (`eph_customers`, `eph_products`, `eph_stores`, `eph_employees`, `eph_orders`): deduplicated, per-entity views over `obt_b`, materialised as `ephemeral` (compiled inline, no physical table).
   - **Dimensions** (`dim_customers`, `dim_products`, `dim_stores`, `dim_employees`, `dim_orders`): dbt **snapshots** over the ephemeral models, using `strategy: timestamp` on each entity's `updated_timestamp` column, giving full SCD Type 2 history (`dbt_valid_from`, `dbt_valid_to`, `dbt_scd_id`).
   - **Fact** (`fact_orders`): built directly from `obt_b` at the **order-item grain** (one row per `order_item_id`), carrying natural keys and measures (`total_amount`, `quantity`, `unit_price`, `line_amount`).
 
@@ -129,7 +113,7 @@ The project follows a Medallion archityecture pattern with Bronze, Silver and Go
 
 4. **Connect Databricks to the Postgres source**
 
-   Confirm the database is reachable, then in Databricks go to **Data Ingestion** then **Postgres connection** and authenticate using the connection string generated at project creation:
+   Confirm the database is reachable, then in Databricks go to **Data Ingestion**, then **Postgres connection** and authenticate using the connection string generated at project creation:
 
    ```bash
    neon psql --database-name <your_database_name>
@@ -186,15 +170,15 @@ Databricks Lakeflow connects to the Neon Postgres source and performs query-base
 
 #### Silver_t Layer (Per-Source Transformation)
 
-One dbt model per source entity (`customers_t`, `stores_t`, `products_t`, `employees_t`, `orders_t`, `order_items_t`), materialized as `incremental`, keyed on its natural ID, only processing rows newer than the current max `updated_timestamp` in the target table.
+One dbt model per source entity (`customers_t`, `stores_t`, `products_t`, `employees_t`, `orders_t`, `order_items_t`), materialised as `incremental`, keyed on its natural ID, only processing rows newer than the current max `updated_timestamp` in the target table.
 
 #### Silver_b Layer (Business OBT)
 
-A single wide, denormalized table (`obt_b`) that left-joins all six Silver_t models around `orders_t`, renaming columns per source.
+A single wide, denormalised table (`obt_b`) that left-joins all six Silver_t models around `orders_t`, renaming columns per source.
 
 #### Gold Layer
 
-- **Ephemeral models**: `SELECT DISTINCT` over `obt_b`, one per dimension entity, deduplicating rows before they're historized. Materialized as `ephemeral` ; compiled inline into the snapshot query, no physical table created.
+- **Ephemeral models**: `SELECT DISTINCT` over `obt_b`, one per dimension entity, deduplicating rows before they're historized. Materialised as `ephemeral`; compiled inline into the snapshot query, no physical table created.
 - **Dimensions (SCD Type 2)**: dbt snapshots over each ephemeral model, using `strategy: timestamp` and each entity's own `_updated_timestamp` column to detect changes. `dbt_valid_to_current` is set to `9999-12-31` for open/current rows.
 - **Fact (`fact_orders`)**: resolves the dbt_scd_id of the version valid at order_timestamp using a ranked range join (order_timestamp >= dbt_valid_from AND order_timestamp < dbt_valid_to), and falls back to the earliest available version when the order predates all captured history for that entity.
 
@@ -213,8 +197,8 @@ ingest_cdc → clean_target → source_freshness
 
 - **`ingest_cdc`**: triggers the Databricks Lakeflow ingestion job via `databricks-sdk` and polls until it completes, fails, or is skipped.
 - **`test_silver_t`, `test_silver_b`**: run `dbt test --select <layer>`. All tests default to `error` severity, so a failure here halts the DAG (`trigger_rule="all_success"` on every downstream task). The goal here is that Gold never builds on data that failed validation.
-- Runs via Docker Compose using `CeleryExecutor`, with Databricks credentials (`DATABRICKS_HOST`, `DATABRICKS_DBT_ACCESS_TOKEN`, `DATABRICKS_JOB_ID`) supplied through `.env` rather than hardcoded. `DATABRICKS_JOB_ID` is validated to be non-zero at DAG-parse time so a missing env variable fails loudly.
-- **Not yet configured**: `schedule` and `start_date` are commented out in the `@dag` decorator, so the pipeline currently runs on manual trigger only. Pause the databricks ingestion job when the scheduled one is setup.
+- Runs via Docker Compose using `CeleryExecutor`, with Databricks credentials (`DATABRICKS_HOST`, `DATABRICKS_DBT_ACCESS_TOKEN`, `DATABRICKS_JOB_ID`) supplied through `.env` rather than hardcoded. `DATABRICKS_JOB_ID` is validated to be non-zero at DAG-parse time, so a missing variable fails loudly.
+- **Not yet configured**: `schedule` and `start_date` are commented out in the `@dag` decorator, so the pipeline currently runs on manual trigger only. Pause the Databricks ingestion job when the scheduled one is set up.
 
 ---
 
@@ -245,8 +229,8 @@ Every layer is validated by its own `dbt test` step before the next layer is all
   - **Standardisation**: categorical fields (e.g. `is_active`) fall within their expected domain; `email` contains `@`.
   - **Normalisation**: foreign keys resolve to a real row in the referenced table (e.g. every `employees_t.store_id` exists in `stores_t`; every `order_items_t.order_id`/`product_id` exists in `orders_t`/`products_t`).
   - **Enrichment**: audit columns like `processed_at` are populated.
-- **silver_b custom test** (`tests/silver_b/test_obt.sql`): fails if any row in `obt_b` has a null `order_id`, `order_item_id`, `customer_id`, `product_id`, `employee_id`, or `store_id` (a broken join). This is the guarantee the whole Gold layer depends on, since Gold is built entirely from `obt_b`.
-- **sold generic tests** (`models/gold/fact/properties.yml`): `not_null` on `fact_orders.customer_scd_id`, `product_scd_id`, `store_scd_id`, and `employee_scd_id`. These should never actually fire in practice since the FK-integrity guarantee from `test_obt.sql` means every natural key on `fact_orders` has a matching dimension row, so the point-in-time resolution (with its earliest-version fallback) always resolves to something. Failure of any of these signals either that upstream FK guarantee broke, or a bug in the resolution logic.
+- **silver_b custom test** (`tests/silver_b/test_obt.sql`): fails if any row in `obt_b` has a null `order_id`, `order_item_id`, `customer_id`, `product_id`, `employee_id`, or `store_id` (a broken join). The Gold layer depends on this guarantee, since it is built entirely from `obt_b`.
+- **sold generic tests** (`models/gold/fact/properties.yml`): `not_null` on `fact_orders.customer_scd_id`, `product_scd_id`, `store_scd_id`, and `employee_scd_id`. These should never fire in practice because the FK-integrity guarantee from `test_obt.sql` means every natural key on `fact_orders` has a matching dimension row, so point-in-time resolution (with its earliest-version fallback) always resolves to something. If any of these fail, it signals either that the upstream FK guarantee broke or that the resolution logic has a bug.
 
 ---
 
@@ -265,6 +249,6 @@ Then re-run `dbt debug`.
 - Run `cat airflow/dbt/profiles.yml` and check host, HTTP path, and token.
 - Confirm the Neon database is reachable with `neon psql --database-name <your_database_name>` before troubleshooting the Databricks side.
 
-#### Airflow DAG not appearing / behaving unexpectedly
+#### Airflow DAG not appearing/behaving unexpectedly
 
 - Only files that define a DAG belong in `airflow/dags/`. Any other script in that folder gets executed by the scheduler on every parse cycle, not just imported.
