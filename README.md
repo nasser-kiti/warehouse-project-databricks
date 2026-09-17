@@ -49,11 +49,11 @@ Build a Databricks-based data warehouse that ingests retail transaction data fro
 
 #### Business Rules
 
-- Each source table carries `created_timestamp`, `updated_timestamp`, and `is_active` audit columns; `updated_timestamp` is the cursor column for incremental capture **and** for SCD Type 2 change detection in Gold.
+- Each source table carries `created_timestamp`, `updated_timestamp`, and `is_active` audit columns; `updated_timestamp` is the cursor column for incremental capture and for SCD Type 2 change detection in Gold.
 - Records are upserted (not appended) on their natural key so re-running ingestion or dbt does not create duplicates. Natural keys are used throughout even in the Gold dimensions since dbt's snapshot feature already generates its own surrogate versioning columns (`dbt_scd_id`, `dbt_valid_from`, `dbt_valid_to`), so hand-rolled surrogate keys aren't needed.
 - The silver_b OBT must never contain a row with a null foreign key across the six join keys (`order_id`, `order_item_id`, `customer_id`, `product_id`, `employee_id`, `store_id`). This is enforced with `error` severity for all tests so a broken join halts the pipeline before Gold builds on bad data.
-- Gold dimensions (`dim_customers`, `dim_products`, `dim_stores`, `dim_employees`, `dim_orders`) are historized with **SCD Type 2** to support point-in-time correctness — e.g., an order should be attributable to the customer's address *as it was when the order was placed*, not their current address.
-- **Known scope limitation**: `dim_orders` tracks changes to order-level attributes (status, payment method) as of each pipeline run, not as a full event log. The source system only captures a single `updated_timestamp` per order; it does not log the timestamp of each individual status transition. This means duration-between-status-changes (e.g., "how long did this order take to ship") is **not reliably derivable** from this design; capturing that would require an event/audit log at the source
+- Gold dimensions (`dim_customers`, `dim_products`, `dim_stores`, `dim_employees`, `dim_orders`) are historized with **SCD Type 2** to support point-in-time correctness e.g. an order should be attributable to the customer's address *as it was when the order was placed*, not their current address.
+- **Known scope limitation**: `dim_orders` tracks changes to order-level attributes (status, payment method) as of each pipeline run, not as a full event log. The source system only captures a single `updated_timestamp` per order. It does not log the timestamp of each individual status transition. This means duration-between-status-changes (e.g., "how long did this order take to ship") is not reliably derivable from this design; capturing that would require an event/audit log at the source.
 
 #### Specifications
 
@@ -195,16 +195,13 @@ A single wide, denormalized table (`obt_b`) that left-joins all six Silver_t mod
 
 - **Ephemeral models**: `SELECT DISTINCT` over `obt_b`, one per dimension entity, deduplicating rows before they're historized. Materialized as `ephemeral` ; compiled inline into the snapshot query, no physical table created.
 - **Dimensions (SCD Type 2)**: dbt snapshots over each ephemeral model, using `strategy: timestamp` and each entity's own `_updated_timestamp` column to detect changes. `dbt_valid_to_current` is set to `9999-12-31` for open/current rows.
-- **Fact (`fact_orders`)**: built directly from `obt_b` at the order-item grain, carrying natural keys only (no `ref()` to the ephemeral models or dimension snapshots).
-
-> **⚠️ Known modeling gap - read before querying**: `fact_orders` currently joins to the Gold dimensions on plain natural-key equality (e.g. `fact_orders.customer_id = dim_customers.customer_id`). Because the dimensions are Type 2 (multiple rows per natural key over time), **a naive join will fan out** i.e. one fact row will match every historical version of that customer.
-> The intended design is **point-in-time correctness**: an order should join to the dimension row that was valid *at the time the order was placed*, using a range condition against `dbt_valid_from`/`dbt_valid_to` rather than plain equality. This is not yet implemented in a documented view or macro — see [Roadmap](#roadmap--next-steps). Until it is, always add `AND dim.dbt_valid_to = '9999-12-31'` to any join if you want current-state semantics instead.
+- **Fact (`fact_orders`)**: joined to the dimension tables that was valid using a range condition against `dbt_valid_from`/`dbt_valid_to` rather than plain equality.
 
 ---
 
 ### Orchestration
 
-The `walmart_data_pipeline` DAG (`airflow/dags/orchestrate.py`) runs the full pipeline as a linear chain, so each layer only builds once the layer before it has been built **and validated**:
+The `walmart_data_pipeline` DAG (`airflow/dags/orchestrate.py`) runs the full pipeline as a linear chain, so each layer only builds once the layer before it has been built and validated:
 
 ```
 ingest_cdc → clean_target → source_freshness
@@ -215,7 +212,7 @@ ingest_cdc → clean_target → source_freshness
 
 - **`ingest_cdc`**: triggers the Databricks Lakeflow ingestion job via `databricks-sdk` and polls until it completes, fails, or is skipped.
 - **`test_silver_t`, `test_silver_b`**: run `dbt test --select <layer>`. All tests default to `error` severity, so a failure here halts the DAG (`trigger_rule="all_success"` on every downstream task). The goal here is that Gold never builds on data that failed validation.
-- Runs via Docker Compose using `CeleryExecutor`, with Databricks credentials (`DATABRICKS_HOST`, `DATABRICKS_DBT_ACCESS_TOKEN`, `DATABRICKS_JOB_ID`) supplied through `.env` rather than hardcoded — `DATABRICKS_JOB_ID` is validated to be non-zero at DAG-parse time so a missing/misconfigured env var fails loudly instead of silently targeting an invalid job.
+- Runs via Docker Compose using `CeleryExecutor`, with Databricks credentials (`DATABRICKS_HOST`, `DATABRICKS_DBT_ACCESS_TOKEN`, `DATABRICKS_JOB_ID`) supplied through `.env` rather than hardcoded. `DATABRICKS_JOB_ID` is validated to be non-zero at DAG-parse time so a missing env variable fails loudly.
 - **Not yet configured**: `schedule` and `start_date` are commented out in the `@dag` decorator, so the pipeline currently runs on manual trigger only. Pause the databricks ingestion job when the scheduled one is setup.
 
 ### Data Sources
