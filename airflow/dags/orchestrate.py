@@ -52,7 +52,7 @@ def orchestrate():
 
     @task.bash
     def source_freshness():
-        return "cd " + DBT_PROJECT_DIR + " && dbt source freshness"
+        return "cd " + DBT_PROJECT_DIR + " && dbt deps && dbt source freshness"
 
     build_silver_t = BashOperator(
         task_id="build_silver_t",
