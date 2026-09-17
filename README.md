@@ -24,6 +24,7 @@ This project demonstrates how to build a modern data warehouse on **Databricks (
   - [Orchestration](#orchestration)
   - [Data Sources](#data-sources)
     - [Postgres Source System (via Neon)](#postgres-source-system-via-neon)
+  - [Data Quality Checks](#data-quality-checks)
   - [Troubleshooting](#troubleshooting)
     - [dbt profile path issues](#dbt-profile-path-issues)
     - [Database connection failures](#database-connection-failures)
@@ -76,7 +77,7 @@ The project follows a Medallion archityecture pattern with Bronze, Silver and Go
   - **Dimensions** (`dim_customers`, `dim_products`, `dim_stores`, `dim_employees`, `dim_orders`): dbt **snapshots** over the ephemeral models, using `strategy: timestamp` on each entity's `updated_timestamp` column, giving full SCD Type 2 history (`dbt_valid_from`, `dbt_valid_to`, `dbt_scd_id`).
   - **Fact** (`fact_orders`): built directly from `obt_b` at the **order-item grain** (one row per `order_item_id`), carrying natural keys and measures (`total_amount`, `quantity`, `unit_price`, `line_amount`).
 
-![Data architecture diagram](/assets/images/data_architecture_diagram.png)
+![Data architecture diagram](assets/images/data_architecture_diagram.png)
 
 #### Technology Stack
 
@@ -126,7 +127,7 @@ The project follows a Medallion archityecture pattern with Bronze, Silver and Go
 ![Catalog Creation 2](assets/images/databricks_catalog_step2.png)
 ![Schema Creation](assets/images/databricks_create_schema.png)
 
-1. **Connect Databricks to the Postgres source**
+4. **Connect Databricks to the Postgres source**
 
    Confirm the database is reachable, then in Databricks go to **Data Ingestion** then **Postgres connection** and authenticate using the connection string generated at project creation:
 
@@ -134,12 +135,12 @@ The project follows a Medallion archityecture pattern with Bronze, Silver and Go
    neon psql --database-name <your_database_name>
    ```
 
-> Hint: The connection details are in the database url
-> `postgresql://<username>:<password>@<host>/<database>?channel_binding=require&sslmode=require`
+   > Hint: The connection details are in the database url
+   > `postgresql://<username>:<password>@<host>/<database>?channel_binding=require&sslmode=require`
 
    Native Change Data Capture is **not available on Databricks' free tier**, so this pipeline uses **query-based incremental capture** instead, using `updated_timestamp` as the cursor column, landing into the `bronze` schema on a schedule with failure alerts.
 
-1. **Set up dbt**
+5. **Set up dbt**
 
    ```bash
    uv add dbt-core dbt-databricks
@@ -150,7 +151,7 @@ The project follows a Medallion archityecture pattern with Bronze, Silver and Go
 
    If `dbt debug` fails, check `~/.dbt/profiles.yml` (or `airflow/dbt/profiles.yml`, since this project keeps its profile alongside the dbt project) for misconfigured values.
 
-2. **Run and test the models manually (optional - see [Orchestration](#orchestration) for the automated path)**
+6. **Run and test the models manually (optional - see [Orchestration](#orchestration) for the automated path)**
 
    ```bash
    dbt run --select silver_t && dbt test --select silver_t
@@ -162,7 +163,7 @@ The project follows a Medallion archityecture pattern with Bronze, Silver and Go
 
    ![Creating the silver layer](assets/images/silver_technical_creation.png)
    ![Creating the gold layer](assets/images/gold_creation.png)
-3. **Run the pipeline via Airflow**
+7. **Run the pipeline via Airflow**
 
    ```bash
    cd airflow
@@ -189,13 +190,13 @@ One dbt model per source entity (`customers_t`, `stores_t`, `products_t`, `emplo
 
 #### Silver_b Layer (Business OBT)
 
-A single wide, denormalized table (`obt_b`) that left-joins all six Silver_t models around `orders_t`, renaming ambiguous columns per source.
+A single wide, denormalized table (`obt_b`) that left-joins all six Silver_t models around `orders_t`, renaming columns per source.
 
 #### Gold Layer
 
 - **Ephemeral models**: `SELECT DISTINCT` over `obt_b`, one per dimension entity, deduplicating rows before they're historized. Materialized as `ephemeral` ; compiled inline into the snapshot query, no physical table created.
 - **Dimensions (SCD Type 2)**: dbt snapshots over each ephemeral model, using `strategy: timestamp` and each entity's own `_updated_timestamp` column to detect changes. `dbt_valid_to_current` is set to `9999-12-31` for open/current rows.
-- **Fact (`fact_orders`)**: joined to the dimension tables that was valid using a range condition against `dbt_valid_from`/`dbt_valid_to` rather than plain equality.
+- **Fact (`fact_orders`)**: resolves the dbt_scd_id of the version valid at order_timestamp using a ranked range join (order_timestamp >= dbt_valid_from AND order_timestamp < dbt_valid_to), and falls back to the earliest available version when the order predates all captured history for that entity.
 
 ---
 
@@ -215,6 +216,8 @@ ingest_cdc → clean_target → source_freshness
 - Runs via Docker Compose using `CeleryExecutor`, with Databricks credentials (`DATABRICKS_HOST`, `DATABRICKS_DBT_ACCESS_TOKEN`, `DATABRICKS_JOB_ID`) supplied through `.env` rather than hardcoded. `DATABRICKS_JOB_ID` is validated to be non-zero at DAG-parse time so a missing env variable fails loudly.
 - **Not yet configured**: `schedule` and `start_date` are commented out in the `@dag` decorator, so the pipeline currently runs on manual trigger only. Pause the databricks ingestion job when the scheduled one is setup.
 
+---
+
 ### Data Sources
 
 #### Postgres Source System (via Neon)
@@ -227,6 +230,23 @@ ingest_cdc → clean_target → source_freshness
 - **order_items**: order_item_id, order_id (FK), product_id (FK), quantity, unit_price, line_amount, audit columns
 
 Seed data is loaded via `src/warehouse_airflow_dbt/load_data.py`, which refuses to run if any target table already has rows.
+
+---
+
+### Data Quality Checks
+
+Every layer is validated by its own `dbt test` step before the next layer is allowed to build (see [Orchestration](#orchestration)). All tests default to **`error`** severity; a failure halts the pipeline unless a specific rule justifies otherwise.
+
+- **silver_t generic tests** (`models/silver_t/properties.yml`):
+  - `products_t`: `not_null` + `unique` on `product_id`, `not_null` on `product_name`, `not_null` + `dbt_utils.expression_is_true (> 0)` on `price`.
+  - `orders_t`: `not_null` + `unique` on `order_id`.
+- **silver_t singular tests** (`tests/silver_t/`): one file per remaining table (`test_customers_t.sql`, `test_stores_t.sql`, `test_employees.sql`, `test_order_items_t.sql`), each combining multiple checks in a single query via `UNION ALL`, tagged with a `failure_reason` column so a failure identifies which specific check tripped. Checks are grouped by the same categories the silver_t layer is meant to enforce:
+  - **Cleaning**: primary key not null, no duplicate natural keys, measures (e.g. `quantity`, `unit_price`, `salary`) are positive where applicable.
+  - **Standardisation**: categorical fields (e.g. `is_active`) fall within their expected domain; `email` contains `@`.
+  - **Normalisation**: foreign keys resolve to a real row in the referenced table (e.g. every `employees_t.store_id` exists in `stores_t`; every `order_items_t.order_id`/`product_id` exists in `orders_t`/`products_t`).
+  - **Enrichment**: audit columns like `processed_at` are populated.
+- **silver_b custom test** (`tests/silver_b/test_obt.sql`): fails if any row in `obt_b` has a null `order_id`, `order_item_id`, `customer_id`, `product_id`, `employee_id`, or `store_id` (a broken join). This is the guarantee the whole Gold layer depends on, since Gold is built entirely from `obt_b`.
+- **sold generic tests** (`models/gold/fact/properties.yml`): `not_null` on `fact_orders.customer_scd_id`, `product_scd_id`, `store_scd_id`, and `employee_scd_id`. These should never actually fire in practice since the FK-integrity guarantee from `test_obt.sql` means every natural key on `fact_orders` has a matching dimension row, so the point-in-time resolution (with its earliest-version fallback) always resolves to something. Failure of any of these signals either that upstream FK guarantee broke, or a bug in the resolution logic.
 
 ---
 
@@ -247,4 +267,4 @@ Then re-run `dbt debug`.
 
 #### Airflow DAG not appearing / behaving unexpectedly
 
-- Only files that define a DAG belong in `airflow/dags/`. Any other script in that folder gets **executed** by the scheduler on every parse cycle, not just imported.
+- Only files that define a DAG belong in `airflow/dags/`. Any other script in that folder gets executed by the scheduler on every parse cycle, not just imported.
