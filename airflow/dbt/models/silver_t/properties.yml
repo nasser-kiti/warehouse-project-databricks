@@ -11,16 +11,14 @@ models:
         - name: price
           data_tests:
             - not_null
-            - greater_than:
-                value: 0
+            - dbt_utils.expression_is_true:
+                arguments:
+                  expression: " > 0"
+
 
     - name: orders_t
       columns:
         - name: order_id
           data_tests:
             - not_null
-            - unique:
-                    config:
-                        severity: error
-                        error_if: ">1000"
-                        warn_if: ">10"
+            - unique

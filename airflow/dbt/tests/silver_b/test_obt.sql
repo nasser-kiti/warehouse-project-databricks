@@ -1,9 +1,3 @@
-{{
-    config(
-        severity='warn',
-    )
-}}
-
 SELECT 1
 FROM {{ ref('obt_b') }} AS obt
 WHERE

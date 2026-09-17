@@ -1,0 +1,26 @@
+version: 2
+
+models:
+  - name: fact_orders
+    description: >
+      Order-item grain fact table. Dimension references are resolved to the
+      version of each dimension that was valid at order_timestamp (point-in-time
+      correctness), falling back to the earliest available version when
+      order_timestamp predates all captured snapshot history for that entity.
+    columns:
+      - name: customer_scd_id
+        description: Resolved dbt_scd_id of dim_customers as of order_timestamp.
+        tests:
+          - not_null
+      - name: product_scd_id
+        description: Resolved dbt_scd_id of dim_products as of order_timestamp.
+        tests:
+          - not_null
+      - name: store_scd_id
+        description: Resolved dbt_scd_id of dim_stores as of order_timestamp.
+        tests:
+          - not_null
+      - name: employee_scd_id
+        description: Resolved dbt_scd_id of dim_employees as of order_timestamp.
+        tests:
+          - not_null
