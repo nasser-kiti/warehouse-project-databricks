@@ -9,32 +9,29 @@ import pendulum
 
 load_dotenv()
 
+DATABRICKS_HOST = os.environ.get("DATABRICKS_HOST")
 DATABRICKS_TOKEN = os.environ.get("DATABRICKS_DBT_ACCESS_TOKEN")
+DATABRICKS_JOB_ID = int(os.environ.get("DATABRICKS_JOB_ID", 0))
 DBT_PROJECT_DIR = "/opt/airflow/dbt"
 
 
 @dag(
     dag_id="walmart_data_pipeline",
-    # schedule="0 11 * * *",
+    # schedule=\"0 11 * * *\",
     # catchup=False,
-    # start_date=pendulum.datetime(year=2026, month=9, day=18, tz="America/Chicago"),
+    # start_date=pendulum.datetime(year=2026, month=9, day=18, tz=\"America/Chicago\"),
 )
 def orchestrate():
 
     @task
     def ingest_cdc():
-        client = WorkspaceClient(
-            host="dbc-402075c9-dd7d.cloud.databricks.com",
-            token=DATABRICKS_TOKEN,
-        )
-
-        job_trigger = client.jobs.run_now(job_id=78036674000819)
+        client = WorkspaceClient(host=DATABRICKS_HOST, token=DATABRICKS_TOKEN)
+        job_trigger = client.jobs.run_now(job_id=DATABRICKS_JOB_ID)
 
         while True:
             job_status = client.jobs.get_run(run_id=job_trigger.run_id)
             if not job_status.state:
-                print("Job status is None. Unable to retrieve job state.")
-                break
+                raise Exception("Job status is None. Unable to retrieve job state.")
             error_states = [RunLifeCycleState.TERMINATED, RunLifeCycleState.INTERNAL_ERROR]
             if job_status.state.result_state == RunResultState.SUCCESS:
                 print("Job completed successfully.")
@@ -46,69 +43,78 @@ def orchestrate():
                 raise Exception(f"Job failed with state: {job_status.state.result_state}\nJob details: {job_status}")
             else:
                 print(f"Job is {str(job_status.state.life_cycle_state).split('.')[-1]}. . .")
-            time.sleep(5)  # Wait for 5 seconds before checking the status again
+            time.sleep(5)
         return
 
     @task.bash
     def clean_target():
-        return "rm -rf " + DBT_PROJECT_DIR + "/target && rm -rf " + DBT_PROJECT_DIR + "/dbt_modules && rm -rf " + DBT_PROJECT_DIR + "/logs"
+        return "cd " + DBT_PROJECT_DIR + " && dbt clean"
 
     @task.bash
     def source_freshness():
         return "cd " + DBT_PROJECT_DIR + " && dbt source freshness"
 
-    silver_technical_tests = BashOperator(
-        task_id="silver_t_quality_check",
-        cwd=DBT_PROJECT_DIR,
-        bash_command="dbt test --select silver_t"
-    )
-
-    silver_business_tests = BashOperator(
-        task_id="silver_b_quality_check",
-        cwd=DBT_PROJECT_DIR,
-        bash_command="dbt test --select silver_b"
-    )
-
-    silver_technical = BashOperator(
+    build_silver_t = BashOperator(
         task_id="build_silver_t",
         cwd=DBT_PROJECT_DIR,
-        bash_command="dbt run --select silver_t"
+        bash_command="dbt run --select silver_t",
     )
 
-    silver_business = BashOperator(
+    test_silver_t = BashOperator(
+        task_id="test_silver_t",
+        cwd=DBT_PROJECT_DIR,
+        bash_command="dbt test --select silver_t",
+    )
+
+    build_silver_b = BashOperator(
         task_id="build_silver_b",
         cwd=DBT_PROJECT_DIR,
-        bash_command="dbt run --select silver_b"
+        bash_command="dbt run --select silver_b",
+    )
+
+    test_silver_b = BashOperator(
+        task_id="test_silver_b",
+        cwd=DBT_PROJECT_DIR,
+        bash_command="dbt test --select silver_b",
     )
 
     gold_ephemeral = BashOperator(
         task_id="build_gold_ephemeral",
         cwd=DBT_PROJECT_DIR,
-        bash_command="dbt run --select gold/ephemeral"
+        bash_command="dbt run --select gold/ephemeral",
     )
 
     gold_dimensions = BashOperator(
         task_id="build_gold_dimensions",
         cwd=DBT_PROJECT_DIR,
-        bash_command="dbt snapshot"
+        bash_command="dbt snapshot",
     )
 
     gold_fact = BashOperator(
         task_id="build_gold_fact",
         cwd=DBT_PROJECT_DIR,
-        bash_command="dbt run --select gold/fact"
+        bash_command="dbt run --select gold/fact",
     )
 
-    check_data_freshness = ingest_cdc() >> clean_target() >> source_freshness()
-    quality_check_silver_technical = check_data_freshness >> silver_technical_tests
-    quality_check_silver_business = check_data_freshness >> silver_business_tests
+    test_gold = BashOperator(
+        task_id="test_gold",
+        cwd=DBT_PROJECT_DIR,
+        bash_command="dbt test --select gold",
+    )
 
-    quality_check_silver_technical >> silver_technical
-    quality_check_silver_business >> silver_technical
-
-    build_silver_layer = silver_technical >> silver_business
-
-    build_silver_layer >> gold_ephemeral >> gold_dimensions >> gold_fact
+    (
+        ingest_cdc()
+        >> clean_target()
+        >> source_freshness()
+        >> build_silver_t
+        >> test_silver_t
+        >> build_silver_b
+        >> test_silver_b
+        >> gold_ephemeral
+        >> gold_dimensions
+        >> gold_fact
+        >> test_gold
+    )
 
 
 orchestrate_dag = orchestrate()
