@@ -1,108 +1,105 @@
-# Data Warehousing Project (Databricks + dbt)
+## Data Warehousing Project (Databricks + dbt + Airflow)
 
-This project demonstrates how to build a modern data warehouse on **Databricks (Unity Catalog)**, using **dbt** for transformation and (in progress) **Apache Airflow** for orchestration. It ingests a synthetic Walmart-style retail dataset from a serverless Postgres source into a Bronze/Silver/Gold-style lakehouse.
+This project demonstrates how to build a modern data warehouse on **Databricks (Unity Catalog)**, using **dbt** for transformation and **Apache Airflow** (via Docker Compose) for orchestration. It ingests a synthetic Walmart-style retail dataset from a serverless Postgres source into a lakehouse, with **SCD Type 2** history on Gold dimensions.
 
-> **Status: In Progress.** Source generation, Bronze ingestion, and the Silver layer are implemented and working. Gold (star schema) and Airflow orchestration are not yet built — see [Project Status](#project-status) and [Roadmap](#roadmap--next-steps) for exactly what's done vs. planned.
+### Table of Contents
 
-## Table of Contents
-
-- [Project Overview](#project-overview)
-- [Project Status](#project-status)
-- [Project Requirements](#project-requirements)
-- [Data Architecture](#data-architecture)
-- [Technology Stack](#technology-stack)
-- [Getting Started](#getting-started)
-- [Data Loading Pipeline](#data-loading-pipeline)
-- [Data Quality Checks](#data-quality-checks)
-- [Data Sources](#data-sources)
-- [Documentation](#documentation)
-- [Troubleshooting](#troubleshooting)
-- [Roadmap / Next Steps](#roadmap--next-steps)
+- [Data Warehousing Project (Databricks + dbt + Airflow)](#data-warehousing-project-databricks--dbt--airflow)
+  - [Table of Contents](#table-of-contents)
+  - [Project Overview](#project-overview)
+  - [Project Requirements](#project-requirements)
+  - [Objective](#objective)
+    - [Business Rules](#business-rules)
+    - [Specifications](#specifications)
+  - [Data Architecture](#data-architecture)
+    - [Technology Stack](#technology-stack)
+  - [Getting Started](#getting-started)
+    - [Prerequisites](#prerequisites)
+    - [Setup Steps](#setup-steps)
+  - [Data Loading Pipeline](#data-loading-pipeline)
+    - [Bronze Layer (Raw Ingestion)](#bronze-layer-raw-ingestion)
+    - [Silver\_t Layer (Per-Source Transformation)](#silver_t-layer-per-source-transformation)
+    - [Silver\_b Layer (Business OBT)](#silver_b-layer-business-obt)
+    - [Gold Layer](#gold-layer)
+  - [Orchestration](#orchestration)
+  - [Data Sources](#data-sources)
+    - [Postgres Source System (via Neon)](#postgres-source-system-via-neon)
+  - [Troubleshooting](#troubleshooting)
+    - [dbt profile path issues](#dbt-profile-path-issues)
+    - [Database connection failures](#database-connection-failures)
+    - [Airflow DAG not appearing / behaving unexpectedly](#airflow-dag-not-appearing--behaving-unexpectedly)
 
 ---
 
-## Project Overview
+### Project Overview
 
 This project involves:
 
-- **Data Architecture**: A Bronze → Silver (technical) → Silver (business) pipeline on Databricks Unity Catalog, with a Gold star schema planned as the final layer.
+- **Data Architecture**: A Medallion architecture on Databricks Unity Catalog.
 - **Ingestion**: Incremental, timestamp-based capture from a Postgres OLTP source into Databricks via a managed Lakeflow connection.
-- **Transformation**: dbt models on Databricks SQL, using incremental materializations and a denormalized One Big Table (OBT) for business-layer reporting.
-- **Data Quality**: dbt generic and custom tests, applied incrementally as each model matures.
-- **Orchestration** *(planned)*: Apache Airflow to schedule and monitor the ingestion → dbt run → dbt test pipeline end-to-end.
+- **Transformation**: dbt models on Databricks SQL; incremental silver models, a denormalized One Big Table (OBT) business layer, and a Gold-layer star schema with SCD Type 2 dimensions.
+- **Data Quality**: dbt generic and custom tests, gating each layer before the next is allowed to build.
+- **Orchestration**: An end-to-end Airflow DAG (run via Docker Compose) that sequences ingestion and building the layers gated with tests.
 
----
+### Project Requirements
 
-## Project Status
+### Objective
 
-| Layer / Component | Status | Notes |
-| --- | --- | --- |
-| Source data generation (`load_data.py`, `init_database.sql`) | ✅ Done | Seeds 6 tables into Neon Postgres |
-| Bronze ingestion (Databricks Lakeflow) | ✅ Done | Query-based incremental capture, scheduled |
-| Silver_t (technical/per-source models) | ✅ Done | 6/6 tables modeled, incremental |
-| Silver_b (business OBT) | ✅ Done | Single denormalized fact-style table |
-| dbt tests | 🟡 Partial | Only `products_t` and `orders_t` covered (2/6); one custom OBT null-key test |
-| Gold layer (star schema) | ⬜ Not started | Currently stops at the Silver_b OBT |
-| Airflow orchestration | ⬜ Not started | Ingestion and dbt runs are still triggered manually |
-| Architecture / ERD diagrams | ⬜ Not started | See [Documentation](#documentation) for exactly what to add |
+Build a Databricks-based data warehouse that ingests retail transaction data from an OLTP source, models it into a dimensional (star schema) Gold layer with historized dimensions, and orchestrates the full pipeline with Airflow using incremental loading.
 
----
+#### Business Rules
 
-## Project Requirements
-
-### Building the Data Warehouse (Data Engineering)
-
-#### Objective
-
-Build a Databricks-based data warehouse that ingests retail transaction data from an OLTP source and prepares it for analytical reporting, using incremental (not full-reload) loading throughout.
-
-##### Business Rules
-
-- Each source table carries `created_timestamp`, `updated_timestamp`, and `is_active` audit columns; `updated_timestamp` is the cursor column for incremental capture.
-- Records are upserted (not appended) on their natural key (`customer_id`, `order_id`, `product_id`, etc.) so re-running ingestion or dbt does not create duplicates.
-- The Silver_b OBT should never contain a row with a null foreign key across the six join keys (`order_id`, `order_item_id`, `customer_id`, `product_id`, `employee_id`, `store_id`) — enforced by a custom dbt test (currently `warn` severity, see [Data Quality Checks](#data-quality-checks)).
+- Each source table carries `created_timestamp`, `updated_timestamp`, and `is_active` audit columns; `updated_timestamp` is the cursor column for incremental capture **and** for SCD Type 2 change detection in Gold.
+- Records are upserted (not appended) on their natural key so re-running ingestion or dbt does not create duplicates. Natural keys are used throughout even in the Gold dimensions since dbt's snapshot feature already generates its own surrogate versioning columns (`dbt_scd_id`, `dbt_valid_from`, `dbt_valid_to`), so hand-rolled surrogate keys aren't needed.
+- The silver_b OBT must never contain a row with a null foreign key across the six join keys (`order_id`, `order_item_id`, `customer_id`, `product_id`, `employee_id`, `store_id`). This is enforced with `error` severity for all tests so a broken join halts the pipeline before Gold builds on bad data.
+- Gold dimensions (`dim_customers`, `dim_products`, `dim_stores`, `dim_employees`, `dim_orders`) are historized with **SCD Type 2** to support point-in-time correctness — e.g., an order should be attributable to the customer's address *as it was when the order was placed*, not their current address.
+- **Known scope limitation**: `dim_orders` tracks changes to order-level attributes (status, payment method) as of each pipeline run, not as a full event log. The source system only captures a single `updated_timestamp` per order; it does not log the timestamp of each individual status transition. This means duration-between-status-changes (e.g., "how long did this order take to ship") is **not reliably derivable** from this design; capturing that would require an event/audit log at the source
 
 #### Specifications
 
 - **Data Source**: A single OLTP-style source (Postgres, hosted on Neon) with six related tables: `customers`, `stores`, `products`, `employees`, `orders`, `order_items`.
-- **Loading Strategy**: Incremental only — native CDC is unavailable on Databricks' free tier, so ingestion uses query-based incremental capture on `updated_timestamp` instead.
-- **Integration**: All six tables are joined into a single wide business table (OBT) as an interim analytics-ready layer, with a proper dimensional (star schema) model planned as the next step.
+- **Loading Strategy**: Incremental only since native CDC is unavailable on Databricks' free tier, so ingestion uses query-based incremental capture on `updated_timestamp` instead.
+- **Integration**: All six tables are joined into a single wide business table (OBT), deduplicated into per-entity ephemeral models, historized into Type 2 dimensions, and reassembled into a fact table at the order-item grain.
 - **Documentation**: Clear source-to-target mapping and setup steps so the pipeline can be reproduced from scratch (see [Getting Started](#getting-started)).
 
 ---
 
-## Data Architecture
+### Data Architecture
 
-The project follows a Bronze → Silver → (planned) Gold pattern, adapted for Databricks Unity Catalog:
+The project follows a Medallion archityecture pattern with Bronze, Silver and Gold layers on Databricks Unity Catalog:
 
 - **Bronze Layer**: Raw data landed from the Postgres source into the `walmart.bronze` schema via Databricks Lakeflow, no transformation applied.
 - **Silver_t (Technical) Layer**: One incremental dbt model per source table (`customers_t`, `stores_t`, `products_t`, `employees_t`, `orders_t`, `order_items_t`), each keyed on its natural ID and watermarked on `updated_timestamp`, with a `processed_at` audit column added.
-- **Silver_b (Business) Layer**: A single denormalized One Big Table (`obt_b`) that left-joins all six Silver_t models around `orders`, renaming columns per source table (e.g. `customer_first_name`, `store_city`) so downstream consumers don't need to know the join logic.
-- **Gold Layer** *(planned)*: A dimensional star schema (fact_orders + dimension tables for customers, products, stores, employees) built on top of Silver_b, for BI-tool consumption.
+- **Silver_b (Business) Layer**: A single denormalized One Big Table (`obt_b`) that left-joins all six Silver_t models around `orders`, renaming columns per source table (e.g. `customer_first_name`, `store_city`).
+- **Gold Layer**:
+  - **Ephemeral models** (`eph_customers`, `eph_products`, `eph_stores`, `eph_employees`, `eph_orders`): deduplicated, per-entity views over `obt_b`, materialized as `ephemeral` (compiled inline, no physical table).
+  - **Dimensions** (`dim_customers`, `dim_products`, `dim_stores`, `dim_employees`, `dim_orders`): dbt **snapshots** over the ephemeral models, using `strategy: timestamp` on each entity's `updated_timestamp` column, giving full SCD Type 2 history (`dbt_valid_from`, `dbt_valid_to`, `dbt_scd_id`).
+  - **Fact** (`fact_orders`): built directly from `obt_b` at the **order-item grain** (one row per `order_item_id`), carrying natural keys and measures (`total_amount`, `quantity`, `unit_price`, `line_amount`).
 
-> **📌 Image placeholder — Architecture Diagram**: Add a diagram here (e.g. `assets/docs/data_architecture_diagram.png`) showing Postgres → Databricks Bronze → Silver_t → Silver_b → Gold, mirroring the one in the `warehouse-project-local` repo. This doesn't exist yet — worth creating once Gold is built so the diagram reflects the final architecture in one pass.
+![Data architecture diagram](/assets/images/data_architecture_diagram.png)
 
 #### Technology Stack
 
-- **Source Database**: Lakebase Postgres (via [Neon](https://neon.tech))
+- **Source Database**: Postgres (serverless, via [Neon](https://neon.tech))
 - **Lakehouse Platform**: Databricks (Unity Catalog, Lakeflow ingestion, SQL Warehouse)
 - **Transformation**: dbt Core with the `dbt-databricks` adapter
-- **Orchestration** *(planned)*: Apache Airflow
+- **Orchestration**: Apache Airflow 3.x (CeleryExecutor, via Docker Compose), triggering Databricks jobs via the `databricks-sdk`
 - **Package/Environment Management**: `uv` (Python), Node/npm (for Neon CLI tooling)
 - **IDE**: VS Code, with the "Power User for dbt" extension
 
 ---
 
-## Getting Started
+### Getting Started
 
-### Prerequisites
+#### Prerequisites
 
 - A [Neon](https://neon.tech) account (serverless Postgres)
 - A Databricks workspace with Unity Catalog enabled
 - Python 3 with `uv` installed
 - Node.js (for the Neon CLI)
+- Docker and Docker Compose (for Airflow)
 
-### Setup Steps
+#### Setup Steps
 
 1. **Provision the Postgres source (Neon)**
 
@@ -118,112 +115,112 @@ The project follows a Bronze → Silver → (planned) Gold pattern, adapted for 
 2. **Create the source schema and seed data**
 
    ```bash
-   # Creates the 6 source tables
    psql "$DATABASE_URL" -f src/warehouse_airflow_dbt/init_database.sql
-
-   # Loads CSV seed data into each table (fails if tables aren't empty)
-   uv run src/warehouse_airflow_dbt/load_data.py --data-dir <path-to-csvs>
+   uv run src/warehouse_airflow_dbt/load_data.py --data-dir assets/data
    ```
 
 3. **Create the Unity Catalog structure in Databricks**
 
-   Create a standard catalog named `walmart` and grant access to all workspaces.
+   Create a standard catalog named `walmart`, grant access to all workspaces, then create the `bronze` schema inside it.
+![Catalog Creation 1](assets/images/databricks_catalog_step1.png)
+![Catalog Creation 2](assets/images/databricks_catalog_step2.png)
+![Schema Creation](assets/images/databricks_create_schema.png)
 
-   > **📌 Image**: `assets/docs/databricks_catalog_step1.png` — catalog creation screen.
-   > **📌 Image**: `assets/docs/databricks_catalog_step2.png` — save without creating keys.
+1. **Connect Databricks to the Postgres source**
 
-   Then create the `bronze` schema inside it.
-
-   > **📌 Image**: `assets/docs/databricks_create_schema.png` — schema creation screen.
-
-4. **Connect Databricks to the Postgres source**
-
-   Confirm the database is reachable:
+   Confirm the database is reachable, then in Databricks go to **Data Ingestion** then **Postgres connection** and authenticate using the connection string generated at project creation:
 
    ```bash
    neon psql --database-name <your_database_name>
    ```
 
-   In Databricks, go to **Data Ingestion → Postgres connection**, and authenticate with username/password using the connection string generated at project creation:
+> Hint: The connection details are in the database url
+> `postgresql://<username>:<password>@<host>/<database>?channel_binding=require&sslmode=require`
 
-   ```
-   postgresql://<username>:<password>@<host>/neondb?channel_binding=require&sslmode=require
-   ```
+   Native Change Data Capture is **not available on Databricks' free tier**, so this pipeline uses **query-based incremental capture** instead, using `updated_timestamp` as the cursor column, landing into the `bronze` schema on a schedule with failure alerts.
 
-   > **📌 Image**: `assets/docs/databricks_data_sources.png` — selecting the source database/tables.
-   > **📌 Image**: `assets/docs/image-2.png` *(rename to something descriptive, e.g. `databricks_cursor_column.png`)* — setting `update_timestamp` as the cursor column.
-   > **📌 Image**: `assets/docs/image.png` *(rename, e.g. `databricks_ingestion_schedule.png`)* — selecting the `bronze` schema destination, schedule, and failure alert recipients.
-
-   Native Change Data Capture is **not available on Databricks' free tier**, so this pipeline uses **query-based incremental capture** instead — Databricks runs a managed query on a schedule, using `updated_timestamp` to identify new/changed rows.
-
-5. **Set up dbt**
+1. **Set up dbt**
 
    ```bash
    uv add dbt-core dbt-databricks
-   cd dbt && dbt init
+   cd airflow/dbt && dbt init
    ```
 
-   When prompted, provide:
-   - **Host** and **HTTP path**: from your Databricks SQL Warehouse's *Connection details* tab.
-   - **Access token**: generate one under your Databricks profile → *Developer options* (scope: `sql`), and save it immediately.
-   - **Catalog**: `walmart` (must have Unity Catalog enabled).
-   - **Schema**: a name of your choice; **threads**: `1` is sufficient for this project's volume.
+   Provide the **host** and **HTTP path** from your Databricks SQL Warehouse's *Connection details* tab, an **access token** (Databricks profile → *Developer options*, scope: `sql`), **catalog**: `walmart`, and **threads**: `1`.
 
-   If `dbt debug` fails, check `~/.dbt/profiles.yml` for misconfigured values.
+   If `dbt debug` fails, check `~/.dbt/profiles.yml` (or `airflow/dbt/profiles.yml`, since this project keeps its profile alongside the dbt project) for misconfigured values.
 
-6. **Run and test the models**
+2. **Run and test the models manually (optional - see [Orchestration](#orchestration) for the automated path)**
 
    ```bash
-   dbt run   # builds silver_t and silver_b models
-   dbt test  # runs the generic + custom tests defined so far
+   dbt run --select silver_t && dbt test --select silver_t
+   dbt run --select silver_b && dbt test --select silver_b
+   dbt run --select gold/ephemeral
+   dbt snapshot
+   dbt run --select gold/fact
    ```
 
-   > **📌 Image**: `assets/docs/silver_technical_creation.png` — currently sitting in the repo root; move it into `assets/docs/` for consistency with the other screenshots, and reference it here to show the Silver_t tables after a successful `dbt run`.
+   ![Creating the silver layer](assets/images/silver_technical_creation.png)
+   ![Creating the gold layer](assets/images/gold_creation.png)
+3. **Run the pipeline via Airflow**
+
+   ```bash
+   cd airflow
+   cp .env.example .env
+   docker compose up airflow-init
+   docker compose up
+   ```
+
+   Trigger the `walmart_data_pipeline` DAG from the Airflow UI (`localhost:8080`).
+
+   ![DAG. graph](assets/images/airflow_dag_graph.png)
 
 ---
 
-## Data Loading Pipeline
+### Data Loading Pipeline
 
-### Bronze Layer (Raw Ingestion)
+#### Bronze Layer (Raw Ingestion)
 
-- **Purpose**: Land raw source data in Databricks without transformation.
-- **Process**: Databricks Lakeflow connects to the Neon Postgres source and performs query-based incremental capture on a schedule, landing rows into `walmart.bronze`.
-- **Cursor column**: `updated_timestamp` on every source table.
+Databricks Lakeflow connects to the Neon Postgres source and performs query-based incremental capture on a schedule, landing rows into `walmart.bronze` using `updated_timestamp` as the cursor column.
 
-### Silver_t Layer (Per-Source Transformation)
+#### Silver_t Layer (Per-Source Transformation)
 
-- **Purpose**: One clean, incrementally-updated table per source entity.
-- **Process**: Each dbt model (`customers_t`, `stores_t`, `products_t`, `employees_t`, `orders_t`, `order_items_t`) is materialized as `incremental`, keyed on its natural ID, and only processes rows where `updated_timestamp` is newer than the current max in the target table — avoiding a full table rescan on every run.
-- **Files**: `dbt/warehouse/models/silver_t/*.sql`, schema/tests in `properties.yml`.
+One dbt model per source entity (`customers_t`, `stores_t`, `products_t`, `employees_t`, `orders_t`, `order_items_t`), materialized as `incremental`, keyed on its natural ID, only processing rows newer than the current max `updated_timestamp` in the target table.
 
-### Silver_b Layer (Business OBT)
+#### Silver_b Layer (Business OBT)
 
-- **Purpose**: A single wide, denormalized table (`obt_b`) for straightforward analytical querying without needing to know the underlying join logic.
-- **Process**: Left-joins all six Silver_t models around `orders_t`, renaming ambiguous columns per source (e.g. `customer_first_name` vs. `employee_first_name`).
-- **Files**: `dbt/warehouse/models/silver_b/obt_b.sql`.
+A single wide, denormalized table (`obt_b`) that left-joins all six Silver_t models around `orders_t`, renaming ambiguous columns per source.
 
-### Gold Layer *(planned)*
+#### Gold Layer
 
-- **Purpose**: A dimensional star schema for BI-tool consumption, separating `fact_orders` from `dimension_customers`, `dimension_products`, `dimension_stores`, and `dimension_employees`.
-- **Status**: Not yet started — Silver_b currently serves as the analytics-ready layer in the interim.
+- **Ephemeral models**: `SELECT DISTINCT` over `obt_b`, one per dimension entity, deduplicating rows before they're historized. Materialized as `ephemeral` ; compiled inline into the snapshot query, no physical table created.
+- **Dimensions (SCD Type 2)**: dbt snapshots over each ephemeral model, using `strategy: timestamp` and each entity's own `_updated_timestamp` column to detect changes. `dbt_valid_to_current` is set to `9999-12-31` for open/current rows.
+- **Fact (`fact_orders`)**: built directly from `obt_b` at the order-item grain, carrying natural keys only (no `ref()` to the ephemeral models or dimension snapshots).
+
+> **⚠️ Known modeling gap - read before querying**: `fact_orders` currently joins to the Gold dimensions on plain natural-key equality (e.g. `fact_orders.customer_id = dim_customers.customer_id`). Because the dimensions are Type 2 (multiple rows per natural key over time), **a naive join will fan out** i.e. one fact row will match every historical version of that customer.
+> The intended design is **point-in-time correctness**: an order should join to the dimension row that was valid *at the time the order was placed*, using a range condition against `dbt_valid_from`/`dbt_valid_to` rather than plain equality. This is not yet implemented in a documented view or macro — see [Roadmap](#roadmap--next-steps). Until it is, always add `AND dim.dbt_valid_to = '9999-12-31'` to any join if you want current-state semantics instead.
 
 ---
 
-## Data Quality Checks
+### Orchestration
 
-Testing is applied via dbt's built-in test framework:
+The `walmart_data_pipeline` DAG (`airflow/dags/orchestrate.py`) runs the full pipeline as a linear chain, so each layer only builds once the layer before it has been built **and validated**:
 
-- **`products_t`**: `not_null` and `unique` on `product_id`; `not_null` and `greater_than: 0` on `price`.
-- **`orders_t`**: `not_null` and `unique` on `order_id` (with `warn_if: >10` / `error_if: >1000` duplicate thresholds).
-- **`obt_b` (custom test)**: fails (currently `warn` severity) if any row has a null `order_id`, `order_item_id`, `customer_id`, `product_id`, `employee_id`, or `store_id` — i.e., a broken join.
+```
+ingest_cdc → clean_target → source_freshness
+  → build_silver_t → test_silver_t
+  → build_silver_b → test_silver_b
+  → build_gold_ephemeral → build_gold_dimensions (dbt snapshot) → build_gold_fact
+```
 
-**Known gap**: `customers_t`, `stores_t`, `employees_t`, and `order_items_t` have no tests yet. See [Roadmap](#roadmap--next-steps).
+- **`ingest_cdc`**: triggers the Databricks Lakeflow ingestion job via `databricks-sdk` and polls until it completes, fails, or is skipped.
+- **`test_silver_t`, `test_silver_b`**: run `dbt test --select <layer>`. All tests default to `error` severity, so a failure here halts the DAG (`trigger_rule="all_success"` on every downstream task). The goal here is that Gold never builds on data that failed validation.
+- Runs via Docker Compose using `CeleryExecutor`, with Databricks credentials (`DATABRICKS_HOST`, `DATABRICKS_DBT_ACCESS_TOKEN`, `DATABRICKS_JOB_ID`) supplied through `.env` rather than hardcoded — `DATABRICKS_JOB_ID` is validated to be non-zero at DAG-parse time so a missing/misconfigured env var fails loudly instead of silently targeting an invalid job.
+- **Not yet configured**: `schedule` and `start_date` are commented out in the `@dag` decorator, so the pipeline currently runs on manual trigger only. Pause the databricks ingestion job when the scheduled one is setup.
 
----
+### Data Sources
 
-## Data Sources
-
-### Postgres Source System (via Neon)
+#### Postgres Source System (via Neon)
 
 - **customers**: customer_id, name, contact info, location, audit columns
 - **stores**: store_id, store_name, location, audit columns
@@ -232,82 +229,25 @@ Testing is applied via dbt's built-in test framework:
 - **orders**: order_id, customer_id (FK), store_id (FK), order_timestamp, payment_method, order_status, total_amount, audit columns
 - **order_items**: order_item_id, order_id (FK), product_id (FK), quantity, unit_price, line_amount, audit columns
 
-Seed data is loaded via `src/warehouse_airflow_dbt/load_data.py`, which refuses to run if any target table already has rows (idempotency guard for the seeding step itself).
+Seed data is loaded via `src/warehouse_airflow_dbt/load_data.py`, which refuses to run if any target table already has rows.
 
 ---
 
-## Documentation
+### Troubleshooting
 
-### Existing Diagrams / Screenshots (`assets/docs/`)
-
-- `databricks_catalog_step1.png`, `databricks_catalog_step2.png` — Unity Catalog creation
-- `databricks_create_schema.png` — Bronze schema creation
-- `databricks_data_sources.png` — Postgres connection setup
-- `databricks_ingestion.png`, `image.png`, `image-2.png` — ingestion configuration *(worth renaming `image.png`/`image-2.png` to something descriptive)*
-
-### 📌 Diagrams still to create
-
-| Diagram | Suggested path | When to add it |
-| --- | --- | --- |
-| End-to-end architecture diagram (Postgres → Bronze → Silver_t → Silver_b → Gold) | `assets/docs/data_architecture_diagram.png` | Now, or once Gold exists |
-| Star schema / data model diagram | `assets/docs/gold_data_model_diagram.png` | Once the Gold layer is built |
-| Airflow DAG graph screenshot | `assets/docs/airflow_dag_graph.png` | Once orchestration is implemented |
-| Data flow diagram per layer (optional, matches base project style) | `assets/docs/{layer}_dataflow_diagram.png` | Optional polish pass |
-
-Move `silver_technical_creation.png` from the repo root into `assets/docs/` to keep all documentation images in one place, consistent with the `warehouse-project-local` project.
-
----
-
-## Troubleshooting
-
-### dbt profile path issues
-
-If dbt can't find or apply your connection profile:
+#### dbt profile path issues
 
 ```bash
-mv ~/.dbt/profiles.yml ~/<repository_path>/dbt/profiles.yml
+mv ~/.dbt/profiles.yml ~/<repository_path>/airflow/dbt/profiles.yml
 ```
 
-Then re-run `dbt debug` to confirm the connection.
+Then re-run `dbt debug`.
 
-### Database connection failures
+#### Database connection failures
 
-- Run `cat ~/.dbt/profiles.yml` and check host, HTTP path, and token are correct.
+- Run `cat airflow/dbt/profiles.yml` and check host, HTTP path, and token.
 - Confirm the Neon database is reachable with `neon psql --database-name <your_database_name>` before troubleshooting the Databricks side.
 
----
+#### Airflow DAG not appearing / behaving unexpectedly
 
-## Roadmap / Next Steps
-
-1. Add dbt tests to the remaining four Silver_t models (`customers_t`, `stores_t`, `employees_t`, `order_items_t`).
-2. Design and build the Gold-layer star schema (fact_orders + dimension tables) on top of `obt_b`.
-3. Implement Apache Airflow DAGs to orchestrate ingestion trigger → `dbt run` → `dbt test`, replacing the current manual trigger.
-4. Add the architecture, data model, and DAG diagrams listed in [Documentation](#documentation).
-5. Promote the custom OBT null-key test from `warn` to `error` severity once confident the join logic is stable.
-
-`dbt snapshot`
-![alt text](image.png)
-![alt text](image-1.png)
-
-gold layer
-`dbt run`
-![alt text](image-2.png)
-
-pause db job
- ![alt text](image-3.png)
-
- install databricks job python sdk
- `uv add databricks-sdk`
-
- bucket creation
- ![alt text](image-4.png)
-
- Add external connection for databricks to s3
- ![alt text](image-5.png)
- ![alt text](image-6.png)
- ![alt text](image-7.png)
-![alt text](image-11.png)
- ![alt text](image-9.png)
- ![alt text](image-10.png)
- ![alt text](image-12.png)
- ![alt text](image-13.png)
+- Only files that define a DAG belong in `airflow/dags/`. Any other script in that folder gets **executed** by the scheduler on every parse cycle, not just imported.
